@@ -5,13 +5,17 @@ import WebKit
 @MainActor @Observable public final class BrowserUI {
     private let appStateClient: AppStateClient
     let action: (Action) async -> Void
+    // Closure to check if popup kill is enabled (called synchronously from createWebView)
+    @ObservationIgnored var shouldBlockPopup: (() -> Bool)?
 
     init(
         _ appDependencies: AppDependencies,
-        action: @escaping (Action) async -> Void
+        action: @escaping (Action) async -> Void,
+        shouldBlockPopup: (() -> Bool)? = nil
     ) {
         self.appStateClient = appDependencies.appStateClient
         self.action = action
+        self.shouldBlockPopup = shouldBlockPopup
     }
 
     func runJavaScriptAlertPanel(with message: String) async {
@@ -37,10 +41,29 @@ import WebKit
         return nil
     }
 
+    // This method is called when JavaScript tries to open a new window (window.open())
+    // We check if popup kill is enabled and block the popup if needed
+    func createWebView(with request: URLRequest) async -> WKWebView? {
+        // Check if popup kill is enabled - if so, block the popup
+        let shouldBlock = shouldBlockPopup?() ?? false
+        if shouldBlock {
+            // Notify Browser to save the blocked popup URL
+            await action(.createWebView(request))
+            // Return nil to prevent WebKit from creating a new webview
+            return nil
+        } else {
+            // Popup kill is off, allow the popup by returning nil (WebKit will handle it)
+            // For now, we'll notify Browser and let it load in current tab
+            await action(.createWebView(request))
+            return nil
+        }
+    }
+
     public enum Action: Sendable {
         case runJavaScriptAlertPanel(String)
         case runJavaScriptConfirmPanel(String)
         case runJavaScriptTextInputPanel(String, String?)
+        case createWebView(URLRequest)
     }
 }
 
@@ -77,5 +100,21 @@ public final class BrowserUIDelegate: NSObject, WKUIDelegate, ObservableObject {
         initiatedByFrame frame: WKFrameInfo
     ) async -> String? {
         await store.runJavaScriptTextInputPanel(with: prompt, defaultText: defaultText)
+    }
+
+    // Handle window.open() calls - this is where popups are created
+    public func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        // This is called synchronously, so we use Task to handle async work
+        Task {
+            await store.createWebView(with: navigationAction.request)
+        }
+        // Return nil to prevent creating a new webview (popup is blocked)
+        // The Browser store will handle loading the URL in current tab if popup kill is off
+        return nil
     }
 }

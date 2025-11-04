@@ -26,6 +26,10 @@ import WebUI
     public var customSchemeURL: URL?
     public var isPresentedConfirmationDialog: Bool
     public var isPresentedAlert: Bool
+    // Popup Kill feature: when enabled, blocks new tabs/popups from window.open() or _blank links
+    public var isPopupKillEnabled: Bool
+    // Stores the URL of the last popup that was blocked, so user can restore it if needed
+    public var lastBlockedPopupURL: URL?
     public let navigationDelegate: BrowserNavigationDelegate
     public let uiDelegate: BrowserUIDelegate
     public var settings: Settings?
@@ -47,6 +51,8 @@ import WebUI
         customSchemeURL: URL? = nil,
         isPresentedConfirmationDialog: Bool = false,
         isPresentedAlert: Bool = false,
+        isPopupKillEnabled: Bool = false,
+        lastBlockedPopupURL: URL? = nil,
         browserNavigation: BrowserNavigation? = nil,
         browserUI: BrowserUI? = nil,
         settings: Settings? = nil,
@@ -71,13 +77,19 @@ import WebUI
         self.customSchemeURL = customSchemeURL
         self.isPresentedConfirmationDialog = isPresentedConfirmationDialog
         self.isPresentedAlert = isPresentedAlert
+        self.isPopupKillEnabled = isPopupKillEnabled
+        self.lastBlockedPopupURL = lastBlockedPopupURL
         weak var weakSelf: Browser? = nil
         let browserNavigation = browserNavigation ?? .init(appDependencies, action: {
             await weakSelf?.send(.browserNavigation($0))
+        }, shouldBlockPopup: {
+            weakSelf?.isPopupKillEnabled ?? false
         })
         self.navigationDelegate = .init(store: browserNavigation)
         let browserUI = browserUI ?? .init(appDependencies, action: {
             await weakSelf?.send(.browserUI($0))
+        }, shouldBlockPopup: {
+            weakSelf?.isPopupKillEnabled ?? false
         })
         self.uiDelegate = .init(store: browserUI)
         self.settings = settings
@@ -204,11 +216,19 @@ import WebUI
             guard !openURLResult else { return }
             isPresentedAlert = true
 
-        case let .browserNavigation(.decidePolicyFor(request)):
+        case let .browserNavigation(.decidePolicyFor(request, isPopup)):
             guard let requestURL = request.url else {
                 appStateClient.send(\.actionPolicySubject, input: .cancel)
                 return
             }
+            
+            // If this is a popup and popup kill is enabled, block it and save the URL
+            if isPopup && isPopupKillEnabled {
+                lastBlockedPopupURL = requestURL
+                appStateClient.send(\.actionPolicySubject, input: .cancel)
+                return
+            }
+            
             guard ["http", "https", "blob", "file", "about"].contains(requestURL.scheme) else {
                 appStateClient.send(\.actionPolicySubject, input: .cancel)
                 customSchemeURL = requestURL
@@ -238,6 +258,32 @@ import WebUI
 
         case let .browserUI(.runJavaScriptTextInputPanel(prompt, defaultText)):
             await presentWebDialog(.prompt(prompt, defaultText ?? ""))
+
+        case let .browserUI(.createWebView(request)):
+            // This handles window.open() calls from JavaScript
+            // If popup kill is enabled, block the popup and save the URL
+            if isPopupKillEnabled, let url = request.url {
+                lastBlockedPopupURL = url
+                // Don't create the web view - effectively blocking the popup
+            } else {
+                // Popup kill is off, allow the popup by creating a new web view
+                // For now, we'll load it in the current tab instead
+                // (WKWebView doesn't support multiple tabs in this architecture)
+                if let url = request.url {
+                    await webViewProxyClient.load(request)
+                }
+            }
+
+        case .popupKillToggleTapped:
+            // Toggle the popup kill feature on/off
+            isPopupKillEnabled.toggle()
+
+        case .restoreLastBlockedPopupTapped:
+            // Load the last blocked popup URL in the current tab
+            if let url = lastBlockedPopupURL {
+                await webViewProxyClient.load(URLRequest(url: url))
+                lastBlockedPopupURL = nil // Clear it after restoring
+            }
 
         case .settings(.doneButtonTapped):
             settings = nil
@@ -306,6 +352,8 @@ import WebUI
         case browserUI(BrowserUI.Action)
         case settings(Settings.Action)
         case bookmarkManagement(BookmarkManagement.Action)
+        case popupKillToggleTapped
+        case restoreLastBlockedPopupTapped
 
         public struct EventBridge: Sendable {
             public var getResourceURL: (@MainActor @Sendable (String, String) -> URL?)?
