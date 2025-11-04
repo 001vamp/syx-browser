@@ -48,6 +48,43 @@ struct Toolbar: View {
                 .disabled(!canGoForward)
                 .accessibilityIdentifier("goForwardButton")
                 Spacer()
+                // Popup Kill toggle button - blocks popups when enabled
+                Button {
+                    Task {
+                        await store.send(.popupKillToggleTapped)
+                    }
+                } label: {
+                    Label {
+                        Text("Popup Kill", bundle: .module)
+                    } icon: {
+                        Image(systemName: store.isPopupKillEnabled ? "hand.raised.fill" : "hand.raised")
+                            .imageScale(.large)
+                            .frame(width: imageSize, height: imageSize)
+                            .foregroundColor(store.isPopupKillEnabled ? .red : .primary)
+                    }
+                    .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("popupKillButton")
+                // Restore last blocked popup button - only shown when there's a blocked popup
+                if store.lastBlockedPopupURL != nil {
+                    Button {
+                        Task {
+                            await store.send(.restoreLastBlockedPopupTapped)
+                        }
+                    } label: {
+                        Label {
+                            Text("Restore Popup", bundle: .module)
+                        } icon: {
+                            Image(systemName: "arrow.uturn.backward")
+                                .imageScale(.large)
+                                .frame(width: imageSize, height: imageSize)
+                        }
+                        .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("restorePopupButton")
+                }
                 Button {
                     Task {
                         await store.send(.bookmarkButtonTapped(appDependencies))
